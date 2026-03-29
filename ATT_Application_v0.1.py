@@ -34,8 +34,8 @@ TEST_NAMES = [
     "RH",
 ]
 
-# Тук избираш кои 4 сензорни канала да се виждат долу.
-# Формат: ("Име на плочката", channel_number_from_serial)
+# Кои 4 сензорни канала да се виждат в средната зона
+# Формат: ("Име", channel_number_from_serial)
 SENSOR_DISPLAY_CONFIG = [
     ("Sensor 1", 1),
     ("Sensor 2", 2),
@@ -48,7 +48,14 @@ class SolenoidApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ZF GS3 Solenoid Tester")
-        self.root.geometry("1540x860")
+
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            self.root.geometry("1500x900")
+
+        self.root.minsize(1280, 760)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.ser = None
 
@@ -70,8 +77,6 @@ class SolenoidApp:
         self.build_top_panel()
         self.build_info_panel()
         self.build_main_panel()
-        self.build_sensor_panel()
-        self.build_log_panel()
 
         self.refresh_ports()
         self.refresh_auto_sequence_list()
@@ -177,15 +182,26 @@ class SolenoidApp:
 
     def build_main_panel(self):
         main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill="both", expand=True)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.build_solenoid_panel(main_frame)
+        main_frame.columnconfigure(0, weight=3, minsize=520)
+        main_frame.columnconfigure(1, weight=2, minsize=420)
+        main_frame.columnconfigure(2, weight=0, minsize=420)
+        main_frame.rowconfigure(0, weight=1)
 
-        right_frame = ttk.Frame(main_frame)
-        right_frame.pack(side="right", fill="y", padx=5)
+        left_container = ttk.Frame(main_frame)
+        left_container.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-        self.build_tests_panel(right_frame)
-        self.build_auto_panel(right_frame)
+        center_container = ttk.Frame(main_frame)
+        center_container.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+
+        right_container = ttk.Frame(main_frame)
+        right_container.grid(row=0, column=2, sticky="ns")
+
+        self.build_solenoid_panel(left_container)
+        self.build_sensor_panel(center_container)
+        self.build_tests_panel(right_container)
+        self.build_auto_panel(right_container)
 
     def build_solenoid_panel(self, parent):
         solenoid_frame = ttk.LabelFrame(
@@ -193,7 +209,7 @@ class SolenoidApp:
             text="Manual Solenoid Control",
             padding=10,
         )
-        solenoid_frame.pack(side="left", fill="both", expand=True, padx=5)
+        solenoid_frame.pack(fill="both", expand=True)
 
         ttk.Label(solenoid_frame, text="Channel", width=18).grid(
             row=0, column=0, padx=5, pady=5
@@ -241,13 +257,51 @@ class SolenoidApp:
             self.state_vars.append(state_var)
             self.state_labels.append(state_label)
 
+    def build_sensor_panel(self, parent):
+        sensor_frame = ttk.LabelFrame(parent, text="Sensors", padding=10)
+        sensor_frame.pack(fill="both", expand=True)
+
+        ttk.Label(sensor_frame, text="Sensor", width=18).grid(
+            row=0, column=0, padx=5, pady=5
+        )
+        ttk.Label(sensor_frame, text="Value", width=14).grid(
+            row=0, column=1, padx=5, pady=5
+        )
+
+        for idx, (title, channel) in enumerate(SENSOR_DISPLAY_CONFIG, start=1):
+            ttk.Label(
+                sensor_frame,
+                text=title,
+                width=18,
+            ).grid(row=idx, column=0, padx=5, pady=8, sticky="w")
+
+            value_var = tk.StringVar(value="UNKNOWN")
+            value_label = tk.Label(
+                sensor_frame,
+                textvariable=value_var,
+                width=12,
+                bg="#808080",
+                fg="white",
+                relief="ridge",
+                font=("Arial", 10, "bold"),
+            )
+            value_label.grid(row=idx, column=1, padx=5, pady=8, sticky="ew")
+
+            self.sensor_value_vars.append(value_var)
+            self.sensor_value_labels.append(value_label)
+            self.sensor_channel_to_widget[channel] = idx - 1
+
+
+        sensor_frame.columnconfigure(0, weight=1)
+        sensor_frame.columnconfigure(1, weight=1)
+
     def build_tests_panel(self, parent):
         tests_frame = ttk.LabelFrame(
             parent,
             text="Predefined Tests",
             padding=10,
         )
-        tests_frame.pack(fill="x", pady=5)
+        tests_frame.pack(fill="x", pady=(0, 10))
 
         ttk.Label(
             tests_frame,
@@ -266,13 +320,16 @@ class SolenoidApp:
                 command=lambda name=test_name: self.run_test(name),
             ).grid(row=row, column=col, padx=5, pady=5, sticky="ew")
 
+        for col in range(3):
+            tests_frame.columnconfigure(col, weight=1)
+
     def build_auto_panel(self, parent):
         auto_frame = ttk.LabelFrame(
             parent,
             text="Automatic Sequence",
             padding=10,
         )
-        auto_frame.pack(fill="both", expand=True, pady=10)
+        auto_frame.pack(fill="both", expand=True)
 
         ttk.Button(
             auto_frame,
@@ -306,7 +363,7 @@ class SolenoidApp:
         self.sequence_listbox = tk.Listbox(
             auto_frame,
             width=28,
-            height=len(TEST_NAMES),
+            height=10,
             font=("Consolas", 10),
         )
         self.sequence_listbox.grid(
@@ -316,54 +373,6 @@ class SolenoidApp:
         auto_frame.columnconfigure(0, weight=1)
         auto_frame.columnconfigure(1, weight=1)
         auto_frame.rowconfigure(3, weight=1)
-
-    def build_sensor_panel(self):
-        separator = ttk.Separator(self.root, orient="horizontal")
-        separator.pack(fill="x", padx=10, pady=(0, 6))
-
-        sensor_frame = ttk.LabelFrame(
-            self.root,
-            text="Sensors",
-            padding=10,
-        )
-        sensor_frame.pack(fill="x", padx=10, pady=(0, 10))
-
-        for col, (title, channel) in enumerate(SENSOR_DISPLAY_CONFIG):
-            card_frame = ttk.Frame(sensor_frame, padding=5)
-            card_frame.grid(row=0, column=col, padx=8, pady=5, sticky="nsew")
-
-            ttk.Label(
-                card_frame,
-                text=f"{title} (CH {channel})",
-                font=("Arial", 11, "bold"),
-            ).pack(pady=(0, 6))
-
-            value_var = tk.StringVar(value="---")
-            value_label = tk.Label(
-                card_frame,
-                textvariable=value_var,
-                width=16,
-                height=3,
-                bg="#808080",
-                fg="white",
-                relief="raised",
-                bd=3,
-                font=("Arial", 16, "bold"),
-            )
-            value_label.pack(fill="x")
-
-            self.sensor_value_vars.append(value_var)
-            self.sensor_value_labels.append(value_label)
-            self.sensor_channel_to_widget[channel] = col
-
-            sensor_frame.columnconfigure(col, weight=1)
-
-    def build_log_panel(self):
-        log_frame = ttk.LabelFrame(self.root, text="Serial Log", padding=10)
-        log_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self.log_text = tk.Text(log_frame, height=12, state="disabled")
-        self.log_text.pack(fill="both", expand=True)
 
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
@@ -394,6 +403,9 @@ class SolenoidApp:
             messagebox.showerror("Connection Error", str(e))
 
     def post_connect_setup(self):
+        if not self.ser or not self.ser.is_open:
+            return
+
         self.request_full_status()
         self.send_command("AUTO STATUS")
         self.send_command("STREAM ON")
@@ -419,6 +431,14 @@ class SolenoidApp:
             self.reset_sensor_cards()
 
             self.log(f"Disconnected from {port}")
+
+    def on_close(self):
+        try:
+            self.disconnect_serial()
+        except Exception:
+            pass
+
+        self.root.destroy()
 
     def request_full_status(self):
         self.send_command("GETMODE")
@@ -542,19 +562,19 @@ class SolenoidApp:
     def apply_sensor_style(self, widget_index, raw_value):
         upper = str(raw_value).upper()
 
-        if upper == "OPEN":
-            self.sensor_value_labels[widget_index].config(
-                bg="#6d4c41",
-                fg="white",
-            )
-        elif upper in {"ERR", "UNKNOWN", "---"}:
+        if upper in {"ERR", "UNKNOWN", "---"}:
             self.sensor_value_labels[widget_index].config(
                 bg="#808080",
                 fg="white",
             )
+        elif upper in {"OPEN", "SHORT"}:
+            self.sensor_value_labels[widget_index].config(
+                bg="#c62828",
+                fg="white",
+            )
         else:
             self.sensor_value_labels[widget_index].config(
-                bg="#1565c0",
+                bg="#2e7d32",
                 fg="white",
             )
 
@@ -563,8 +583,8 @@ class SolenoidApp:
             self.current_resistance_raw[i] = "UNKNOWN"
 
         for i, value_var in enumerate(self.sensor_value_vars):
-            value_var.set("---")
-            self.apply_sensor_style(i, "---")
+            value_var.set("UNKNOWN")
+            self.apply_sensor_style(i, "UNKNOWN")
 
     def reset_solenoid_states(self):
         for channel in range(1, len(SOLENOID_NAMES) + 1):
@@ -708,9 +728,7 @@ class SolenoidApp:
                     if not line:
                         continue
 
-                    if not line.startswith("SENSORS "):
-                        self.log(f"Arduino -> PC: {line}")
-
+                    self.log(f"Arduino -> PC: {line}")
                     self.parse_serial_line(line)
             except Exception as e:
                 self.log(f"Read error: {e}")
@@ -718,10 +736,7 @@ class SolenoidApp:
         self.root.after(100, self.poll_serial)
 
     def log(self, message):
-        self.log_text.config(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state="disabled")
+        print(message)
 
 
 if __name__ == "__main__":

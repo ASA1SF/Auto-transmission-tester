@@ -2,31 +2,24 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import serial
 import serial.tools.list_ports
+import time
 
-SOLENOID_NAMES = [
-    "Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8", "Y9", "Y1", "Y10",
-]
+# --- Константи ---
+SOLENOID_NAMES = ["Y2", "Y3", "Y4", "Y5", "Y6", "Y7", "Y8", "Y9", "Y1", "Y10"]
+TEST_NAMES = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "RL", "RH"]
+SENSOR_DISPLAY_CONFIG = [("Sensor 1", 1), ("Sensor 2", 2), ("Sensor 3", 3), ("Sensor 4", 4)]
 
-TEST_NAMES = [
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "RL", "RH",
-]
-
-# Вече можеш да добавяш колкото искаш сензори тук,
-# те автоматично ще се подреждат един под друг.
-SENSOR_DISPLAY_CONFIG = [
-    ("Sensor 1", 1),
-    ("Sensor 2", 2),
-    ("Sensor 3", 3),
-    ("Sensor 4", 4),
-    # Пример: ("Sensor 5", 5),
-]
+OVERTEMP_WARN_SECONDS = 60
+OVERTEMP_CRIT_SECONDS = 120
 
 class SolenoidApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ZF GS3 Solenoid Tester")
-        self.root.geometry("1600x800")
-        self.root.minsize(1400, 700)
+        self.root.geometry("1800x800")
+        self.root.minsize(1500, 700)
+        
+        self.default_bg_color = self.root.cget('bg')
 
         app_frame = ttk.Frame(root)
         app_frame.pack(fill="both", expand=True)
@@ -38,32 +31,32 @@ class SolenoidApp:
         self.sensor_value_labels = []
         self.sensor_channel_to_widget = {}
         self.current_states = ["UNKNOWN"] * len(SOLENOID_NAMES)
-        self.current_resistance_raw = ["UNKNOWN"] * len(SOLENOID_NAMES)
-        self.current_mode_text = "UNKNOWN"
         self.auto_sequence_states = ["pending"] * len(TEST_NAMES)
         self.last_auto_step_name = "-"
-        self.last_auto_step_index = None
+        
+        self.overtemp_labels = []
+        self.solenoid_on_times = {}
 
         self.build_top_panel(app_frame)
         self.build_info_panel(app_frame)
-
+        
         center_frame = ttk.Frame(app_frame)
         center_frame.pack(fill="both", expand=True, padx=10, pady=5)
         center_frame.rowconfigure(0, weight=1)
-        center_frame.columnconfigure(0, weight=2)
-        center_frame.columnconfigure(1, weight=1) # Намаляваме тежестта, за да е по-компактно
+        center_frame.columnconfigure(0, weight=3)
+        center_frame.columnconfigure(1, weight=1)
         center_frame.columnconfigure(2, weight=1)
 
         self.build_solenoid_panel(center_frame)
         self.build_sensor_panel(center_frame)
         self.build_right_panel(center_frame)
-
         self.build_log_panel(app_frame)
 
         self.refresh_ports()
         self.refresh_auto_sequence_list()
         self.reset_sensor_cards()
         self.poll_serial()
+        self.check_overtemp()
 
     def build_top_panel(self, parent):
         top_frame = ttk.Frame(parent, padding=(10, 10, 10, 0))
@@ -93,13 +86,16 @@ class SolenoidApp:
         ttk.Label(info_frame, textvariable=self.stream_var, font=("Arial", 10, "bold")).grid(row=0, column=2, padx=20, pady=5, sticky="w")
         ttk.Label(info_frame, textvariable=self.auto_state_var, font=("Arial", 10, "bold")).grid(row=1, column=0, padx=5, pady=5, sticky="w")
         ttk.Label(info_frame, textvariable=self.auto_current_var, font=("Arial", 10, "bold")).grid(row=1, column=1, columnspan=2, padx=20, pady=5, sticky="w")
-    
+
     def build_solenoid_panel(self, parent):
         solenoid_frame = ttk.LabelFrame(parent, text="Manual Solenoid Control", padding=10)
         solenoid_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        
         ttk.Label(solenoid_frame, text="Channel", width=18).grid(row=0, column=0, padx=5, pady=5)
         ttk.Label(solenoid_frame, text="State", width=10).grid(row=0, column=1, padx=5, pady=5)
         ttk.Label(solenoid_frame, text="Control", width=20).grid(row=0, column=2, columnspan=2, padx=5, pady=5)
+        ttk.Label(solenoid_frame, text="Temperature", width=12).grid(row=0, column=4, padx=5, pady=5)
+
         for i, name in enumerate(SOLENOID_NAMES, start=1):
             ttk.Label(solenoid_frame, text=f"Solenoid {i} ({name})", width=18).grid(row=i, column=0, padx=5, pady=6, sticky="w")
             state_var = tk.StringVar(value="UNKNOWN")
@@ -109,29 +105,28 @@ class SolenoidApp:
             ttk.Button(solenoid_frame, text="OFF", width=10, command=lambda ch=i: self.send_command(f"SET {ch} OFF")).grid(row=i, column=3, padx=5, pady=6)
             self.state_vars.append(state_var)
             self.state_labels.append(state_label)
+            
+            overtemp_label = tk.Label(solenoid_frame, text="Standby", width=12, bg="lightgrey", fg="black", font=("Arial", 9, "bold"), anchor="center")
+            overtemp_label.grid(row=i, column=4, padx=10, pady=6)
+            self.overtemp_labels.append(overtemp_label)
+
+        separator = ttk.Separator(solenoid_frame, orient="horizontal")
+        separator.grid(row=len(SOLENOID_NAMES) + 1, column=0, columnspan=5, sticky="ew", pady=10)
+        
+        all_off_button = ttk.Button(solenoid_frame, text="Turn All Solenoids OFF", command=lambda: self.send_command("SETOFF ALL"))
+        all_off_button.grid(row=len(SOLENOID_NAMES) + 2, column=0, columnspan=5, sticky="ew", padx=5, pady=5)
 
     def build_sensor_panel(self, parent):
         sensor_frame = ttk.LabelFrame(parent, text="Sensors", padding=10)
-        sensor_frame.grid(row=0, column=1, sticky="ns", padx=5) # sticky="ns" за вертикално центриране
-        
-        # Конфигурираме колоната да се разширява, за да може съдържанието да се центрира
+        sensor_frame.grid(row=0, column=1, sticky="ns", padx=5)
         sensor_frame.columnconfigure(0, weight=1)
-
-        # Премахваме вложената grid логика и нареждаме всичко във вертикална колона
         for i, (title, channel) in enumerate(SENSOR_DISPLAY_CONFIG):
-            
-            # Всяка "картичка" е в отделна рамка
             card_frame = ttk.Frame(sensor_frame, padding=(0, 5))
-            card_frame.grid(row=i, column=0, pady=4, sticky="ew") # sticky="ew" за хоризонтално разширяване
-
-            # Заглавие на сензора
+            card_frame.grid(row=i, column=0, pady=4, sticky="ew")
             ttk.Label(card_frame, text=f"{title} (CH {channel})", font=("Arial", 10, "bold")).pack()
-            
-            # Лейбъл за стойността
             value_var = tk.StringVar(value="---")
             value_label = tk.Label(card_frame, textvariable=value_var, width=18, height=2, bg="#808080", fg="white", relief="raised", bd=3, font=("Arial", 14, "bold"))
             value_label.pack(fill="x", pady=(2,0))
-            
             self.sensor_value_vars.append(value_var)
             self.sensor_value_labels.append(value_label)
             self.sensor_channel_to_widget[channel] = i
@@ -139,7 +134,7 @@ class SolenoidApp:
     def build_right_panel(self, parent):
         right_frame = ttk.Frame(parent)
         right_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
-        right_frame.rowconfigure(1, weight=1) # Даваме тежест на auto_panel
+        right_frame.rowconfigure(1, weight=1)
         self.build_tests_panel(right_frame)
         self.build_auto_panel(right_frame)
 
@@ -172,6 +167,39 @@ class SolenoidApp:
         self.log_text = tk.Text(log_frame, height=8, state="disabled")
         self.log_text.pack(fill="both", expand=True)
 
+    def check_overtemp(self):
+        current_time = time.time()
+        for channel, start_time in list(self.solenoid_on_times.items()):
+            on_duration = current_time - start_time
+            label = self.overtemp_labels[channel - 1]
+            if on_duration > OVERTEMP_CRIT_SECONDS:
+                label.config(text="OVERTEMP", bg="red", fg="white")
+            elif on_duration > OVERTEMP_WARN_SECONDS:
+                label.config(text="Warning", bg="orange", fg="black")
+            else:
+                label.config(text="OK", bg="#90ee90", fg="black")
+        self.root.after(2000, self.check_overtemp)
+
+    def set_state(self, channel, state):
+        index = channel - 1
+        if not (0 <= index < len(self.state_vars)): return
+
+        self.current_states[index] = state
+        self.state_vars[index].set(state)
+        state_label = self.state_labels[index]
+        overtemp_label = self.overtemp_labels[index]
+
+        if state == "ON":
+            state_label.config(bg="#2e7d32", fg="white")
+            if channel not in self.solenoid_on_times:
+                self.solenoid_on_times[channel] = time.time()
+            overtemp_label.config(text="OK", bg="#90ee90", fg="black")
+        else:
+            state_label.config(bg="#c62828" if state == "OFF" else "#808080", fg="white")
+            if channel in self.solenoid_on_times:
+                del self.solenoid_on_times[channel]
+            overtemp_label.config(text="Standby", bg="lightgrey", fg="black")
+    
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
         self.port_combo["values"] = ports
@@ -204,19 +232,27 @@ class SolenoidApp:
         if self.ser and self.ser.is_open:
             try:
                 self.ser.write(b"STREAM OFF\n")
-            except Exception:
-                pass
-            port = self.ser.port
+            except Exception: pass
             self.ser.close()
             self.connection_var.set("Disconnected")
             self.mode_var.set("Mode: Unknown")
             self.stream_var.set("Sensor stream: Unknown")
             self.auto_state_var.set("Auto sequence: STOPPED")
             self.auto_current_var.set("Current step: -")
-            self.current_mode_text = "UNKNOWN"
             self.reset_solenoid_states()
             self.reset_sensor_cards()
-            self.log(f"Disconnected from {port}")
+            self.log(f"Disconnected")
+
+    def send_command(self, cmd):
+        if not self.ser or not self.ser.is_open:
+            messagebox.showwarning("Warning", "Not connected to Arduino.")
+            return
+        try:
+            self.ser.write((cmd + "\n").encode("utf-8"))
+            if not cmd.startswith("STREAM"):
+                 self.log(f"PC -> Arduino: {cmd}")
+        except Exception as e:
+            messagebox.showerror("Send Error", str(e))
 
     def request_full_status(self):
         self.send_command("GETMODE")
@@ -233,22 +269,9 @@ class SolenoidApp:
     def stop_auto_sequence(self):
         self.send_command("AUTO STOP")
 
-    def send_command(self, cmd):
-        if not self.ser or not self.ser.is_open:
-            messagebox.showwarning("Warning", "Not connected to Arduino.")
-            return
-        try:
-            self.ser.write((cmd + "\n").encode("utf-8"))
-            if not cmd.startswith("STREAM"): # Да не спамим лога
-                 self.log(f"PC -> Arduino: {cmd}")
-        except Exception as e:
-            messagebox.showerror("Send Error", str(e))
-
     def reset_auto_sequence_view(self):
         self.auto_sequence_states = ["pending"] * len(TEST_NAMES)
         self.last_auto_step_name = "-"
-        self.last_auto_step_index = None
-        self.auto_progress["maximum"] = len(TEST_NAMES)
         self.auto_progress["value"] = 0
         self.auto_state_var.set("Auto sequence: STARTING...")
         self.auto_current_var.set("Current step: -")
@@ -256,7 +279,7 @@ class SolenoidApp:
 
     def refresh_auto_sequence_list(self):
         self.sequence_listbox.delete(0, tk.END)
-        current_index = None
+        current_index = -1
         for idx, test_name in enumerate(TEST_NAMES):
             state = self.auto_sequence_states[idx]
             prefix = "[ ]"
@@ -266,22 +289,19 @@ class SolenoidApp:
                 current_index = idx
             self.sequence_listbox.insert(tk.END, f"{prefix} Test {test_name}")
         
-        self.sequence_listbox.selection_clear(0, tk.END)
-        if current_index is not None:
+        if current_index != -1:
+            self.sequence_listbox.selection_clear(0, tk.END)
             self.sequence_listbox.selection_set(current_index)
             self.sequence_listbox.see(current_index)
 
     def update_auto_step(self, step_number, total_steps, test_name):
         step_index = step_number - 1
         if not (0 <= step_index < len(TEST_NAMES)): return
-
         self.last_auto_step_name = test_name
-        self.last_auto_step_index = step_index
         for i in range(len(TEST_NAMES)):
             if i < step_index: self.auto_sequence_states[i] = "done"
             elif i == step_index: self.auto_sequence_states[i] = "current"
             else: self.auto_sequence_states[i] = "pending"
-        
         self.auto_progress["maximum"] = total_steps
         self.auto_progress["value"] = step_number
         self.auto_state_var.set("Auto sequence: RUNNING")
@@ -301,19 +321,16 @@ class SolenoidApp:
         return f"{value:.0f} Ω"
 
     def format_resistance(self, value_text):
-        upper = str(value_text).upper()
-        if upper in {"OPEN", "SHORT", "ERR", "UNKNOWN"}: return upper
-        try:
-            return self.format_ohms_value(float(value_text))
-        except (ValueError, TypeError):
-            return str(value_text)
+        try: return self.format_ohms_value(float(value_text))
+        except (ValueError, TypeError): return str(value_text)
 
     def apply_sensor_style(self, widget_index, raw_value):
         label = self.sensor_value_labels[widget_index]
-        upper = str(raw_value).upper()
-        if upper == "OPEN": label.config(bg="#6d4c41", fg="white")
-        elif upper in {"ERR", "UNKNOWN", "---"}: label.config(bg="#808080", fg="white")
-        else: label.config(bg="#1565c0", fg="white")
+        try:
+            float(raw_value)
+            label.config(bg="#1565c0", fg="white")
+        except (ValueError, TypeError):
+            label.config(bg="#808080", fg="white")
 
     def reset_sensor_cards(self):
         for i in range(len(self.sensor_value_vars)):
@@ -324,16 +341,6 @@ class SolenoidApp:
         for i in range(len(SOLENOID_NAMES)):
             self.set_state(i + 1, "UNKNOWN")
 
-    def set_state(self, channel, state):
-        index = channel - 1
-        if not (0 <= index < len(self.state_vars)): return
-        self.current_states[index] = state
-        self.state_vars[index].set(state)
-        label = self.state_labels[index]
-        if state == "ON": label.config(bg="#2e7d32", fg="white")
-        elif state == "OFF": label.config(bg="#c62828", fg="white")
-        else: label.config(bg="#808080", fg="white")
-
     def set_resistance(self, channel, value_text):
         widget_index = self.sensor_channel_to_widget.get(channel)
         if widget_index is None: return
@@ -342,33 +349,27 @@ class SolenoidApp:
 
     def parse_serial_line(self, line):
         if not line: return
-        
         if line.startswith("SENSORS "):
             self.parse_sensors(line)
-            return # Не логваме сензорните данни, за да не спамим
-
+            return
         self.log(f"Arduino -> PC: {line}")
-        
-        parts = line.split(maxsplit=1)
+        parts = line.split()
+        if not parts: return
         cmd = parts[0]
-        args = parts[1] if len(parts) > 1 else ""
-
         if cmd == "READY": self.log("Arduino is ready.")
-        elif cmd == "MODE": self.mode_var.set(f"Mode: {args.strip()}")
-        elif cmd == "STREAM": self.stream_var.set(f"Sensor stream: {args}")
-        elif cmd == "AUTO_STATE": self.auto_state_var.set(f"Auto sequence: {args.strip().upper()}")
+        elif cmd == "MODE": self.mode_var.set(f"Mode: {line.split(maxsplit=1)[1]}")
+        elif cmd == "STREAM": self.stream_var.set(f"Sensor stream: {line.split(maxsplit=1)[1]}")
+        elif cmd == "AUTO_STATE": self.auto_state_var.set(f"Auto sequence: {line.split(maxsplit=1)[1].upper()}")
         elif cmd == "AUTO_DONE": self.complete_auto_sequence()
-        elif cmd == "TEST_APPLIED": self.log(f"Applied test: {args}")
-        elif cmd == "ERROR": self.log(f"Arduino error: {args}")
+        elif cmd == "APPLIED_TEST": self.log(f"Applied test: {line.split(maxsplit=1)[1]}")
+        elif cmd == "ERROR": self.log(f"Arduino error: {line.split(maxsplit=1)[1]}")
         elif cmd == "ALL": self.parse_all_states(line)
-        elif cmd in ("SOL", "STATE"):
-            sub_parts = args.split()
-            if len(sub_parts) == 2 and sub_parts[0].isdigit():
-                self.set_state(int(sub_parts[0]), sub_parts[1].upper())
         elif cmd == "AUTO_STEP":
-            sub_parts = args.split(maxsplit=2)
-            if len(sub_parts) == 3 and sub_parts[0].isdigit() and sub_parts[1].isdigit():
-                self.update_auto_step(int(sub_parts[0]), int(sub_parts[1]), sub_parts[2])
+            if len(parts) == 4 and parts[1].isdigit() and parts[2].isdigit():
+                self.update_auto_step(int(parts[1]), int(parts[2]), parts[3])
+        elif cmd in ("SOL", "STATE"):
+            if len(parts) == 3 and parts[1].isdigit():
+                self.set_state(int(parts[1]), parts[2].upper())
 
     def parse_all_states(self, line):
         items = line.split()[1:]

@@ -6,6 +6,7 @@ import serial.tools.list_ports
 import time
 import os
 
+#test
 # --- Настройки на CustomTkinter ---
 ctk.set_appearance_mode("Dark")     # Тъмен режим
 ctk.set_default_color_theme("blue")  # Синя тема на бутоните
